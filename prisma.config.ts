@@ -1,6 +1,10 @@
 import { defineConfig, env } from "@prisma/config";
 
-process.loadEnvFile();
+// No .env file exists in deployed environments (Vercel injects env vars
+// directly into process.env) — only load it when present, for local dev.
+try {
+  process.loadEnvFile();
+} catch {}
 
 export default defineConfig({
   schema: "prisma/schema.prisma",
