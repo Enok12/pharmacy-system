@@ -1,0 +1,357 @@
+// Pharmacy Inventory & POS System — Prisma Schema
+// PHASE 8: adds StockAdjustment and SaleReturn/SaleReturnItem/
+// SaleReturnItemBatch for corrections. Business models are added in
+// their respective phases (9). Do not add them here ahead of schedule.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// A trivial model so `prisma migrate dev` / `prisma db push` has something
+// to apply and we can verify the DB connection end-to-end in Phase 1 testing.
+model HealthCheck {
+  id        String   @id @default(cuid())
+  status    String   @default("ok")
+  checkedAt DateTime @default(now())
+
+  @@map("health_checks")
+}
+
+enum Role {
+  ADMIN
+  PHARMACIST
+  CASHIER
+}
+
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         Role     @default(CASHIER)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  refreshTokens    RefreshToken[]
+  stockIns         StockIn[]
+  sales            Sale[]
+  stockAdjustments StockAdjustment[]
+  saleReturns      SaleReturn[]
+
+  @@map("users")
+}
+
+// Refresh tokens are stored hashed (never the raw token) so rotation and
+// logout can revoke a specific token without trusting the JWT alone —
+// a stolen-but-unrevoked refresh token is the main risk of pure JWT auth.
+model RefreshToken {
+  id        String    @id @default(cuid())
+  tokenHash String    @unique
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+enum UnitOfMeasure {
+  TABLET
+  CAPSULE
+  BOTTLE
+  VIAL
+  TUBE
+  BOX
+  STRIP
+  ML
+  MG
+  G
+  UNIT
+}
+
+model Category {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  products Product[]
+
+  @@map("categories")
+}
+
+model Manufacturer {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  products Product[]
+
+  @@map("manufacturers")
+}
+
+// Uniqueness is anchored on (name, manufacturerId), not barcode alone (it's
+// optional) and not name alone (the same generic drug legitimately ships
+// under one name from multiple manufacturers).
+model Product {
+  id             String        @id @default(cuid())
+  name           String
+  genericName    String?
+  categoryId     String
+  category       Category      @relation(fields: [categoryId], references: [id])
+  manufacturerId String
+  manufacturer   Manufacturer  @relation(fields: [manufacturerId], references: [id])
+  unitOfMeasure  UnitOfMeasure
+  barcode        String?       @unique
+  costPrice      Decimal       @db.Decimal(10, 2)
+  sellingPrice   Decimal       @db.Decimal(10, 2)
+  taxRate        Decimal       @default(0) @db.Decimal(5, 2)
+  reorderLevel   Int           @default(0)
+  isActive       Boolean       @default(true)
+  description    String?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  batches   Batch[]
+  saleItems SaleItem[]
+
+  @@unique([name, manufacturerId])
+  @@index([categoryId])
+  @@index([manufacturerId])
+  @@index([isActive])
+  @@map("products")
+}
+
+model Supplier {
+  id            String   @id @default(cuid())
+  name          String   @unique
+  contactPerson String?
+  phone         String?
+  email         String?
+  address       String?
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  stockIns StockIn[]
+
+  @@map("suppliers")
+}
+
+// A receipt header for one supplier delivery. Line items (Batch) are
+// created together with this record and never edited afterward —
+// correcting a received quantity is a stock adjustment, which is
+// Phase 8's job, not this one's.
+model StockIn {
+  id              String   @id @default(cuid())
+  supplierId      String
+  supplier        Supplier @relation(fields: [supplierId], references: [id])
+  referenceNumber String?
+  receivedById    String
+  receivedBy      User     @relation(fields: [receivedById], references: [id])
+  receivedAt      DateTime @default(now())
+  notes           String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  batches Batch[]
+
+  @@index([supplierId])
+  @@map("stock_ins")
+}
+
+// quantityRemaining is seeded equal to quantityReceived here and is not
+// decremented by anything yet — that starts in Phase 7 (Sales). Storing
+// it separately now avoids a later migration.
+model Batch {
+  id                String    @id @default(cuid())
+  stockInId         String
+  stockIn           StockIn   @relation(fields: [stockInId], references: [id], onDelete: Cascade)
+  productId         String
+  product           Product   @relation(fields: [productId], references: [id])
+  batchNumber       String
+  expiryDate        DateTime
+  manufacturingDate DateTime?
+  quantityReceived  Int
+  quantityRemaining Int
+  costPricePerUnit  Decimal   @db.Decimal(10, 2)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  saleItemBatches    SaleItemBatch[]
+  stockAdjustments   StockAdjustment[]
+  returnBatchCredits SaleReturnItemBatch[]
+
+  @@index([productId])
+  @@index([expiryDate])
+  @@index([stockInId])
+  @@map("batches")
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+}
+
+model Sale {
+  id             String        @id @default(cuid())
+  saleNumber     Int           @unique @default(autoincrement())
+  cashierId      String
+  cashier        User          @relation(fields: [cashierId], references: [id])
+  subtotal       Decimal       @db.Decimal(10, 2)
+  tax            Decimal       @db.Decimal(10, 2)
+  total          Decimal       @db.Decimal(10, 2)
+  paymentMethod  PaymentMethod
+  amountTendered Decimal?      @db.Decimal(10, 2)
+  changeDue      Decimal?      @db.Decimal(10, 2)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  items   SaleItem[]
+  returns SaleReturn[]
+
+  @@index([cashierId])
+  @@index([createdAt])
+  @@map("sales")
+}
+
+// Snapshots product name/price/tax at sale time — unlike CartItem (Phase
+// 6), which always reflects current pricing since a cart isn't committed,
+// a Sale is a permanent financial record and must stay reproducible even
+// if the product's price changes later.
+model SaleItem {
+  id           String   @id @default(cuid())
+  saleId       String
+  sale         Sale     @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  productId    String
+  product      Product  @relation(fields: [productId], references: [id])
+  productName  String
+  quantity     Int
+  unitPrice    Decimal  @db.Decimal(10, 2)
+  taxRate      Decimal  @db.Decimal(5, 2)
+  lineSubtotal Decimal  @db.Decimal(10, 2)
+  lineTax      Decimal  @db.Decimal(10, 2)
+  lineTotal    Decimal  @db.Decimal(10, 2)
+  createdAt    DateTime @default(now())
+
+  batchAllocations SaleItemBatch[]
+  returnItems      SaleReturnItem[]
+
+  @@index([saleId])
+  @@index([productId])
+  @@map("sale_items")
+}
+
+// Records exactly which batch(es) a sale line's FEFO allocation drew
+// from, and how much — Phase 8 needs this to know what to restock on a
+// return.
+model SaleItemBatch {
+  id         String   @id @default(cuid())
+  saleItemId String
+  saleItem   SaleItem @relation(fields: [saleItemId], references: [id], onDelete: Cascade)
+  batchId    String
+  batch      Batch    @relation(fields: [batchId], references: [id])
+  quantity   Int
+  createdAt  DateTime @default(now())
+
+  @@index([saleItemId])
+  @@index([batchId])
+  @@map("sale_item_batches")
+}
+
+enum AdjustmentReason {
+  DAMAGED
+  EXPIRED
+  LOST_STOLEN
+  COUNT_CORRECTION
+  OTHER
+}
+
+// An immutable audit entry correcting a batch's quantityRemaining outside
+// the normal stock-in/sell flow (damage, loss, expiry write-off, count
+// error). A mistaken adjustment gets corrected by posting another one in
+// the opposite direction, never by editing history.
+model StockAdjustment {
+  id             String           @id @default(cuid())
+  batchId        String
+  batch          Batch            @relation(fields: [batchId], references: [id])
+  quantityChange Int
+  reason         AdjustmentReason
+  notes          String?
+  performedById  String
+  performedBy    User             @relation(fields: [performedById], references: [id])
+  createdAt      DateTime         @default(now())
+
+  @@index([batchId])
+  @@index([performedById])
+  @@map("stock_adjustments")
+}
+
+// A receipt header for a (possibly partial, line-item) return against a
+// Sale. refundAmount is always the sum of its items' server-computed
+// refundAmount — never client-supplied. Immutable once created, same as
+// every other transactional record in this app.
+model SaleReturn {
+  id            String        @id @default(cuid())
+  saleId        String
+  sale          Sale          @relation(fields: [saleId], references: [id])
+  processedById String
+  processedBy   User          @relation(fields: [processedById], references: [id])
+  reason        String?
+  refundAmount  Decimal       @db.Decimal(10, 2)
+  refundMethod  PaymentMethod
+  createdAt     DateTime      @default(now())
+
+  items SaleReturnItem[]
+
+  @@index([saleId])
+  @@map("sale_returns")
+}
+
+model SaleReturnItem {
+  id           String     @id @default(cuid())
+  saleReturnId String
+  saleReturn   SaleReturn @relation(fields: [saleReturnId], references: [id], onDelete: Cascade)
+  saleItemId   String
+  saleItem     SaleItem   @relation(fields: [saleItemId], references: [id])
+  quantity     Int
+  restocked    Boolean    @default(true)
+  refundAmount Decimal    @db.Decimal(10, 2)
+  createdAt    DateTime   @default(now())
+
+  batchReversals SaleReturnItemBatch[]
+
+  @@index([saleReturnId])
+  @@index([saleItemId])
+  @@map("sale_return_items")
+}
+
+// Mirrors SaleItemBatch (Phase 7) in reverse — records exactly which
+// batch(es) a returned line's restock credited, and how much, so a later
+// partial return of the same line can't over-restock a batch beyond what
+// it ever gave up in the first place.
+model SaleReturnItemBatch {
+  id               String         @id @default(cuid())
+  saleReturnItemId String
+  saleReturnItem   SaleReturnItem @relation(fields: [saleReturnItemId], references: [id], onDelete: Cascade)
+  batchId          String
+  batch            Batch          @relation(fields: [batchId], references: [id])
+  quantity         Int
+  createdAt        DateTime       @default(now())
+
+  @@index([saleReturnItemId])
+  @@index([batchId])
+  @@map("sale_return_item_batches")
+}
